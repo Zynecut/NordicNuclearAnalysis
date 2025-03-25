@@ -1268,6 +1268,9 @@ def convert_to_float(data):
     else:
         return data
 
+
+
+
 def create_price_and_utilization_map_FromDB(data: GridData, db: Database, time_max_min, output_path):
     """
     Generate a folium map displaying nodal prices and branch utilization.
@@ -1314,7 +1317,7 @@ def create_price_and_utilization_map_FromDB(data: GridData, db: Database, time_m
     display(m)
 
 
-def add_node_marker(data, index, price, avg_national_prices, m, colormap):
+def add_node_marker(data, index, price, avg_national_prices, avg_zone_price, m, colormap, exchange_rate_NOK_EUR):
     """
     Add a marker to the map for a specific node, displaying its price and zone information.
 
@@ -1336,19 +1339,20 @@ def add_node_marker(data, index, price, avg_national_prices, m, colormap):
     node_id = data.node.loc[index, 'id']
     node_zone = data.node.loc[index, 'zone']
     area = data.node.loc[index, 'area']
+    zonal_price = avg_zone_price.get(node_zone, 'N/A')
     area_price = avg_national_prices.get(area, 'N/A')
-
-    # EUR_TO_ORE_PER_KWH = eur_to_nok / 1000 * 100
-    # price_nok = price * EUR_TO_ORE_PER_KWH
-    # area_price_nok = area_price * EUR_TO_ORE_PER_KWH if isinstance(area_price, (int, float)) else 'N/A'
+    nodal_price_nok = (price * exchange_rate_NOK_EUR)/10
+    zonal_price_nok = (zonal_price  * exchange_rate_NOK_EUR)/10
+    area_price_nok = (area_price * exchange_rate_NOK_EUR) / 10
 
     popup = folium.Popup(
         f"<b>Node index:</b> {node_idx}<br>"
         f"<b>Node id:</b> {node_id}<br>"
         f"<b>Zone:</b> {node_zone}<br>"
-        f"<b>Price:</b> {price:.2f} EUR/MWh<br>"
-        f"<b>National Price:</b> {f'{area_price:.2f} EUR/MWh' if isinstance(area_price, (int, float)) else 'N/A'}<br>",
-        max_width=200
+        f"<b>Price:</b> {price:.2f} EUR/MWh = {nodal_price_nok:.2f} Øre/KWh <br>"
+        f"<b>Zonal Price:</b> {f'{zonal_price:.2f} EUR/MWh = {zonal_price_nok:.2f} Øre/KWh' if isinstance(zonal_price, (int, float)) else 'N/A'}<br>"
+        f"<b>National Price:</b> {f'{area_price:.2f} EUR/MWh = {area_price_nok:.2f} Øre/KWh' if isinstance(area_price_nok, (int, float)) else 'N/A'}<br>",
+        max_width=300
     )
     folium.CircleMarker(
         location=[lat, lon],
@@ -1386,7 +1390,7 @@ def add_branch_lines(data, utilisation, flows, branch_type, m, line_colormap, da
 
         popup_content = folium.Popup(
             f"<b>{branch_type} Line</b><br>"
-            f"<b>Power Flow:</b> {flows[idx]:.2f} MW<br>"
+            f"<b>Power Flow:</b> {flows[2][idx]:.2f} MW<br>"
             f"<b>Utilisation:</b> {utilisation_percent:.2f}%",
             max_width=150
         )
@@ -1401,7 +1405,14 @@ def add_branch_lines(data, utilisation, flows, branch_type, m, line_colormap, da
         ).add_to(m)
 
         mid_lat, mid_lon = _pointBetween((nodeA['lat'], nodeA['lon']), (nodeB['lat'], nodeB['lon']), weight=0.5)
-        angle = math.degrees(math.atan2(nodeB['lon'] - nodeA['lon'], nodeB['lat'] - nodeA['lat']))
+
+        flow_A_to_B = flows[0][idx]  # Flyt fra A til B
+        flow_B_to_A = flows[1][idx]  # Flyt fra B til A
+
+        if flow_A_to_B >= flow_B_to_A:
+            angle = math.degrees(math.atan2(nodeB['lon'] - nodeA['lon'], nodeB['lat'] - nodeA['lat']))
+        else:
+            angle = math.degrees(math.atan2(nodeA['lon'] - nodeB['lon'], nodeA['lat'] - nodeB['lat']))
 
         folium.RegularPolygonMarker(
             location=[mid_lat, mid_lon],
@@ -2005,5 +2016,70 @@ def plot_Flow_fromDB(db, DATE_START, time_max_min, grid_data_path, OUTPUT_PATH_P
             plot_time_series(row, DATE_START, OUTPUT_PATH_PLOTS, plot_config['save_fig'], plot_config['interval'], plot_config['tex_font'])
 
 
+
+
+def nordic_grid_map_fromDB(data, db: Database, time_range, OUTPUT_PATH, version, START, END, exchange_rate_NOK_EUR=11.38):
+    """
+    Generate an interactive map displaying nodal prices and branch utilization.
+
+    This function creates a folium map that visualizes:
+    - Nodes representing average nodal prices.
+    - Branches representing line utilization for both AC and DC connections.
+
+    The generated map is saved as an HTML file for easy visualization.
+
+    Parameters:
+        data (Scenario):
+            The simulation data containing node and branch information.
+        db (Database):
+            Database object used to retrieve average prices, utilization rates, and flow data.
+        time_range (list):
+            List specifying the start and end time steps for the simulation.
+        OUTPUT_PATH (str):
+            Directory path where the HTML map file will be saved.
+        version (str):
+            Version identifier for the map output file.
+        START (dict):
+            Dictionary specifying the start date and time (e.g., {'year': 2023, 'month': 1, 'day': 1, 'hour': 0}).
+        END (dict):
+            Dictionary specifying the end date and time in the same format as START.
+        exchange_rate_NOK_EUR (float, optional):
+            Conversion rate from EUR to NOK for displaying prices in both currencies.
+            Default is 11.38.
+
+    Returns:
+        None: The generated map is saved directly to the specified `OUTPUT_PATH`.
+    """
+
+    avg_nodal_prices = list(map(float, getAverageNodalPricesFromDB(db, time_range)))
+    avg_area_price = {key: float(value) for key, value in getAreaPricesAverageFromDB(data, db, timeMaxMin=time_range).items()}
+    avg_zone_price = getZonePricesAverageFromDB(data, db, time_range)
+    ac_utilisation = list(map(float, getAverageUtilisationFromDB(data, db, time_range, branchtype="ac")))
+    dc_utilisation = list(map(float, getAverageUtilisationFromDB(data, db, time_range, branchtype="dc")))
+    ac_flows = convert_to_float(getAverageBranchFlowsFromDB(db, time_range, branchtype="ac"))
+    dc_flows = convert_to_float(getAverageBranchFlowsFromDB(db, time_range, branchtype="dc"))
+
+    f = folium.Figure(width=700, height=800)
+    m = folium.Map(location=[data.node["lat"].mean(), data.node["lon"].mean()], zoom_start=4.4)
+    m.add_to(f)
+
+    colormap = cm.LinearColormap(['green', 'yellow', 'red'], vmin=min(avg_nodal_prices), vmax=max(avg_nodal_prices))
+    colormap.caption = 'Nodal Prices'
+    colormap.add_to(m)
+
+    for i, price in enumerate(avg_nodal_prices):
+        add_node_marker(data, i, price, avg_area_price, avg_zone_price, m, colormap,exchange_rate_NOK_EUR)
+
+    line_colormap = cm.LinearColormap(['green', 'yellow', 'red'], vmin=0, vmax=1)
+    line_colormap.caption = 'Branch Utilisation'
+    line_colormap.add_to(m)
+
+    add_branch_lines(data, ac_utilisation, ac_flows, 'AC', m, line_colormap)
+    add_branch_lines(data, dc_utilisation, dc_flows, 'DC', m, line_colormap, dashed=True)
+
+    start_str = f"{START['year']}_{START['month']}_{START['day']}_{START['hour']}"
+    end_str = f"{END['year']}_{END['month']}_{END['day']}_{END['hour']}"
+    output_path = OUTPUT_PATH / f'nordic_grid_map_{version}_{start_str}__to__{end_str}.html'
+    m.save(output_path)
 
 
